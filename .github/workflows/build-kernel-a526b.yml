@@ -280,8 +280,8 @@ jobs:
             cp kernel-artifacts/modules/*.ko AnyKernel3/modules/system/lib/modules/
           fi
 
-          cat > AnyKernel3/anykernel.sh << 'EOF'
-# AnyKernel3 — SM-A526B — LineageOS 23.2
+          python3 - << PYEOF
+content = """# AnyKernel3 - SM-A526B - LineageOS 23.2
 properties() { '
 kernel.string=LineageOS 23.2 Kernel for SM-A526B
 do.devicecheck=1
@@ -301,7 +301,10 @@ patch_vbmeta_flag=auto;
 . tools/ak3-core.sh
 split_boot;
 flash_boot;
-EOF
+"""
+with open("AnyKernel3/anykernel.sh", "w") as f:
+    f.write(content)
+PYEOF
 
           DATE=$(date +%Y%m%d-%H%M)
           ZIP="LineageOS23.2-Kernel-a526b-${DATE}.zip"
