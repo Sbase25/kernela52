@@ -147,15 +147,34 @@ jobs:
             LLVM_IAS=1
           )
 
-          if make "${MAKE_ARGS[@]}" "${DEFCONFIG}" 2>/dev/null; then
-            echo "Used: ${DEFCONFIG}"
-          elif make "${MAKE_ARGS[@]}" a52xq_defconfig 2>/dev/null; then
-            echo "Used: a52xq_defconfig"
+          echo "=== Available configs in arch/arm64/configs/ ==="
+          ls arch/arm64/configs/
+          echo "=== Contents of vendor/ subfolder ==="
+          ls arch/arm64/configs/vendor/ 2>/dev/null || echo "(no vendor/ subfolder)"
+
+          # Auto-discover the correct defconfig
+          FOUND=""
+
+          # 1. a52-specific config inside vendor/
+          FOUND=$(find arch/arm64/configs/vendor/ -name "*a52*defconfig" 2>/dev/null | sort | head -1)
+          if [ -n "$FOUND" ]; then
+            DEFCONFIG_USE="vendor/$(basename $FOUND)"
+
+          # 2. Any defconfig inside vendor/
+          elif FOUND=$(find arch/arm64/configs/vendor/ -name "*defconfig" 2>/dev/null | sort | head -1); [ -n "$FOUND" ]; then
+            DEFCONFIG_USE="vendor/$(basename $FOUND)"
+
+          # 3. a52 defconfig at top level
+          elif FOUND=$(find arch/arm64/configs/ -maxdepth 1 -name "*a52*defconfig" 2>/dev/null | sort | head -1); [ -n "$FOUND" ]; then
+            DEFCONFIG_USE="$(basename $FOUND)"
+
+          # 4. plain defconfig
           else
-            echo "Available defconfigs:"
-            ls arch/arm64/configs/
-            exit 1
+            DEFCONFIG_USE="defconfig"
           fi
+
+          echo "Using defconfig: ${DEFCONFIG_USE}"
+          make "${MAKE_ARGS[@]}" "${DEFCONFIG_USE}"
 
       # ── 9. Apply BPF Kconfig overrides ───────────────────────────────────
       - name: "Apply BPF Kconfig overrides"
