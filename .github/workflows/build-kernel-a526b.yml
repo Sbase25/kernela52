@@ -1,0 +1,504 @@
+# =============================================================================
+#  LineageOS 23.2 (Android 16) Kernel Builder — Samsung Galaxy A52 5G (a526b)
+#  Chipset : Qualcomm SM7225 (Snapdragon 750G)
+#  Kernel  : 4.19 (from a52xq-dev/kernel)
+#  BPF fix : techyminati/fuck-bpf (sixteen-qpr2 branch)
+#
+#  HOW TO USE
+#  ----------
+#  1. Fork  https://github.com/a52xq-dev/kernel  into your own GitHub account.
+#  2. In your fork, create the directory  .github/workflows/
+#  3. Drop this file in as  .github/workflows/build-kernel-a526b.yml
+#  4. Push — the workflow triggers automatically on every push to 'main'.
+#     You can also trigger it manually from the "Actions" tab (workflow_dispatch).
+#  5. When the build finishes, grab the kernel artifacts from the
+#     "Artifacts" section at the bottom of the workflow run page.
+#
+#  OUTPUT ARTIFACTS
+#  ----------------
+#  • Image.gz          – kernel image (flash via AnyKernel3 or include in ROM)
+#  • Image.gz-dtb      – kernel image with appended DTB (some LineageOS builds
+#                        need this instead of Image.gz)
+#  • dtbo.img          – device-tree blob overlay image
+#  • *.ko (modules)    – kernel modules tarball
+#  • AnyKernel3.zip    – ready-to-flash zip (if AnyKernel3 step succeeds)
+# =============================================================================
+
+name: "Build LineageOS 23.2 Kernel (SM-A526B)"
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:           # allows manual "Run workflow" button in Actions tab
+    inputs:
+      debug_enabled:
+        description: 'Enable tmate debug session on failure'
+        required: false
+        default: 'false'
+
+jobs:
+  build:
+    name: "Kernel Build — a526b / SM7225 / 4.19"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120       # safety cut-off; typical build ~45-60 min
+
+    env:
+      # ── Kernel source (this repo itself after checkout) ──────────────────
+      KERNEL_DIR: ${{ github.workspace }}
+
+      # ── Device / build identity ──────────────────────────────────────────
+      ARCH: arm64
+      SUBARCH: arm64
+      DEVICE_CODENAME: a526b
+      DEVICE_MODEL: "Samsung Galaxy A52 5G (SM-A526B)"
+
+      # ── Defconfig ────────────────────────────────────────────────────────
+      # The a52xq kernel ships with vendor/a52xq_defconfig.
+      # Adjust below if your fork uses a different name
+      # (check arch/arm64/configs/ in the repo).
+      DEFCONFIG: vendor/a52xq_defconfig
+
+      # ── Clang version ────────────────────────────────────────────────────
+      # r416183b is the last clang that works well with Samsung 4.19 kernels.
+      # r450784e (clang-14) is a safe alternative if you hit build errors.
+      CLANG_VERSION: r416183b
+
+      # ── Output directory ─────────────────────────────────────────────────
+      OUT: ${{ github.workspace }}/out
+
+      # ── Kernel version string appended to uname -r ───────────────────────
+      LOCALVERSION: "-a526b-lineage23"
+
+    steps:
+      # ── 0. Checkout kernel source ───────────────────────────────────────
+      - name: "Checkout kernel source (a52xq-dev/kernel)"
+        uses: actions/checkout@v4
+        with:
+          # If you forked the repo, this checks out YOUR fork (the current repo).
+          # depth 1 is enough for building; set to 0 only if you need full history.
+          fetch-depth: 1
+
+      # ── 1. Install build dependencies ──────────────────────────────────
+      - name: "Install build dependencies"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates cpio \
+            curl flex git kmod libelf-dev libssl-dev \
+            lz4 python3 python3-pip rsync unzip wget zip \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            libncurses-dev libncurses5 libncurses5-dev
+
+      # ── 2. Cache Clang toolchain ────────────────────────────────────────
+      - name: "Cache Clang toolchain"
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/toolchain/clang
+          key: clang-${{ env.CLANG_VERSION }}-v1
+
+      - name: "Download Clang toolchain (if not cached)"
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ${{ github.workspace }}/toolchain/clang
+          cd ${{ github.workspace }}/toolchain/clang
+          echo "Downloading Android clang ${{ env.CLANG_VERSION }}..."
+          wget -q --show-progress \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-${{ env.CLANG_VERSION }}.tar.gz" \
+            -O clang.tar.gz || \
+          wget -q --show-progress \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-14.0.6/clang+llvm-14.0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz" \
+            -O clang.tar.gz
+          tar --no-same-owner -xf clang.tar.gz
+          rm clang.tar.gz
+          echo "Clang downloaded:"
+          ls -la
+
+      # ── 3. Download GCC cross-compiler (aarch64) ────────────────────────
+      - name: "Cache GCC aarch64 toolchain"
+        id: cache-gcc64
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/toolchain/gcc64
+          key: gcc-aarch64-linux-android-4.9-v1
+
+      - name: "Download GCC aarch64 (if not cached)"
+        if: steps.cache-gcc64.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ${{ github.workspace }}/toolchain/gcc64
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
+            ${{ github.workspace }}/toolchain/gcc64
+
+      # ── 4. Download GCC arm (32-bit, needed for vdso32) ─────────────────
+      - name: "Cache GCC arm32 toolchain"
+        id: cache-gcc32
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/toolchain/gcc32
+          key: gcc-arm-linux-androideabi-4.9-v1
+
+      - name: "Download GCC arm32 (if not cached)"
+        if: steps.cache-gcc32.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ${{ github.workspace }}/toolchain/gcc32
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
+            ${{ github.workspace }}/toolchain/gcc32
+
+      # ── 5. Apply BPF reverts (fuck-bpf, sixteen-qpr2 branch) ────────────
+      #
+      #  The fuck-bpf repo patches *Android framework source* (system/, frameworks/,
+      #  etc.) — not the kernel source itself.  However it also ships a
+      #  kernel/configs/ fragment that disables BPF-related Kconfig options in
+      #  the kernel.  We apply that config fragment here.
+      #
+      #  For the Android-side patches (frameworks/native, system/, etc.) you need
+      #  to apply those in your LineageOS device tree / manifest, not here.
+      #  See: https://github.com/techyminati/fuck-bpf  (branch: sixteen-qpr2)
+      #  and run ./fuck-bpf/apply.sh --mb from the root of your AOSP/LineageOS tree.
+      # ────────────────────────────────────────────────────────────────────
+      - name: "Fetch fuck-bpf kernel config fragment"
+        run: |
+          git clone --depth=1 --branch sixteen-qpr2 \
+            https://github.com/techyminati/fuck-bpf \
+            /tmp/fuck-bpf
+          echo "Contents of fuck-bpf/kernel/configs:"
+          find /tmp/fuck-bpf/kernel -type f | sort || echo "(no kernel/configs found)"
+
+      - name: "Apply BPF kernel config fragment (if present)"
+        run: |
+          FRAG_DIR="/tmp/fuck-bpf/kernel/configs"
+          KCONF_DEST="${KERNEL_DIR}/arch/arm64/configs"
+
+          if ls "${FRAG_DIR}"/*.config 2>/dev/null | head -1 | grep -q .; then
+            echo "Copying BPF config fragments to arch/arm64/configs/"
+            cp "${FRAG_DIR}"/*.config "${KCONF_DEST}/" 2>/dev/null || true
+            echo "BPF config fragments applied."
+          else
+            echo "No .config fragments found in fuck-bpf/kernel/configs — skipping."
+            echo "The BPF reverts for this kernel version may be applied via"
+            echo "Kconfig options below (manual disable of CONFIG_BPF_SYSCALL etc.)"
+          fi
+
+      # ── 6. Set up toolchain path variables ──────────────────────────────
+      - name: "Export toolchain environment variables"
+        run: |
+          CLANG_DIR=$(find ${{ github.workspace }}/toolchain/clang -maxdepth 1 -type d | tail -1)
+          GCC64_DIR="${{ github.workspace }}/toolchain/gcc64"
+          GCC32_DIR="${{ github.workspace }}/toolchain/gcc32"
+
+          echo "CLANG_DIR=${CLANG_DIR}"     >> $GITHUB_ENV
+          echo "GCC64_DIR=${GCC64_DIR}"     >> $GITHUB_ENV
+          echo "GCC32_DIR=${GCC32_DIR}"     >> $GITHUB_ENV
+
+          echo "PATH=${CLANG_DIR}/bin:${GCC64_DIR}/bin:${GCC32_DIR}/bin:${PATH}" \
+               >> $GITHUB_ENV
+
+          # Verify clang is working
+          ${CLANG_DIR}/bin/clang --version || \
+          clang-14 --version || \
+          clang --version
+
+      # ── 7. Create output directory ───────────────────────────────────────
+      - name: "Create out/ directory"
+        run: mkdir -p ${{ env.OUT }}
+
+      # ── 8. Generate .config from defconfig ──────────────────────────────
+      - name: "Generate kernel .config (${{ env.DEFCONFIG }})"
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          set -e
+
+          MAKE_ARGS=(
+            O="${OUT}"
+            ARCH="${ARCH}"
+            SUBARCH="${SUBARCH}"
+            CC="clang"
+            CLANG_TRIPLE="aarch64-linux-gnu-"
+            CROSS_COMPILE="aarch64-linux-android-"
+            CROSS_COMPILE_ARM32="arm-linux-androideabi-"
+            LLVM=1
+            LLVM_IAS=1
+          )
+
+          # Try vendor defconfig first, fall back to plain codename defconfig
+          if make "${MAKE_ARGS[@]}" "${DEFCONFIG}" 2>/dev/null; then
+            echo "Used defconfig: ${DEFCONFIG}"
+          elif make "${MAKE_ARGS[@]}" a52xq_defconfig 2>/dev/null; then
+            echo "Used defconfig: a52xq_defconfig"
+          else
+            echo "ERROR: Could not find a valid defconfig. Listing available configs:"
+            ls arch/arm64/configs/
+            exit 1
+          fi
+
+      # ── 9. Apply BPF Kconfig disables on top of defconfig ────────────────
+      #
+      #  Android 16 QPR2 requires BPF syscall support from the kernel.
+      #  Since the SM7225 / 4.19 kernel has limited BPF support, we disable
+      #  the strict BPF requirements so LineageOS 23.2 can boot.
+      #  The fuck-bpf project handles the Android-side reverts; here we
+      #  ensure the kernel side does not advertise features it can't deliver.
+      # ────────────────────────────────────────────────────────────────────
+      - name: "Apply BPF Kconfig overrides"
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          CONFIG_FILE="${OUT}/.config"
+
+          # Function to set a config option
+          set_config() {
+            local key="$1" val="$2"
+            if grep -q "^${key}=" "${CONFIG_FILE}" 2>/dev/null; then
+              sed -i "s|^${key}=.*|${key}=${val}|" "${CONFIG_FILE}"
+            elif grep -q "^# ${key} is not set" "${CONFIG_FILE}" 2>/dev/null; then
+              sed -i "s|^# ${key} is not set|${key}=${val}|" "${CONFIG_FILE}"
+            else
+              echo "${key}=${val}" >> "${CONFIG_FILE}"
+            fi
+          }
+
+          disable_config() {
+            local key="$1"
+            if grep -q "^${key}=y\|^${key}=m" "${CONFIG_FILE}" 2>/dev/null; then
+              sed -i "s|^${key}=.*|# ${key} is not set|" "${CONFIG_FILE}"
+            elif ! grep -q "${key}" "${CONFIG_FILE}" 2>/dev/null; then
+              echo "# ${key} is not set" >> "${CONFIG_FILE}"
+            fi
+          }
+
+          echo "Applying BPF-related Kconfig adjustments for Android 16 QPR2 compatibility..."
+
+          # Keep basic BPF enabled (needed for networking) but disable
+          # the strict/advanced BPF features Android 16 QPR2 checks for
+          set_config CONFIG_BPF y
+          set_config CONFIG_BPF_SYSCALL y          # minimum BPF syscall support
+          disable_config CONFIG_BPF_JIT_ALWAYS_ON  # don't enforce JIT (4.19 JIT is limited)
+
+          # cBPF / eBPF socket filter — needed for basic networking, keep enabled
+          set_config CONFIG_BPF_EVENTS y
+
+          # Security BPF (LSM BPF) — not available on 4.19, disable
+          disable_config CONFIG_BPF_LSM
+
+          # BTF debug info — 4.19 doesn't generate this properly
+          disable_config CONFIG_DEBUG_INFO_BTF
+
+          # Verify no syntax errors crept in
+          echo "BPF Kconfig overrides applied. Relevant entries:"
+          grep -E "^(CONFIG_BPF|# CONFIG_BPF)" "${CONFIG_FILE}" | head -20
+
+      # ── 10. Merge any fuck-bpf .config fragment (if applicable) ─────────
+      - name: "Merge fuck-bpf kernel config fragment (if present)"
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          FRAG_DIR="/tmp/fuck-bpf/kernel/configs"
+
+          if ls "${FRAG_DIR}"/*.config 2>/dev/null | grep -q .; then
+            for frag in "${FRAG_DIR}"/*.config; do
+              echo "Merging fragment: ${frag}"
+              ./scripts/kconfig/merge_config.sh \
+                -m -O "${OUT}" \
+                "${OUT}/.config" "${frag}" || true
+            done
+            # Finalize config after merges
+            make O="${OUT}" ARCH="${ARCH}" olddefconfig
+          else
+            echo "No fragments to merge — running olddefconfig to finalize config"
+            make O="${OUT}" ARCH="${ARCH}" olddefconfig
+          fi
+
+      # ── 11. Set kernel local version ─────────────────────────────────────
+      - name: "Set LOCALVERSION"
+        run: |
+          echo "CONFIG_LOCALVERSION=\"${LOCALVERSION}\"" >> "${OUT}/.config"
+          echo "CONFIG_LOCALVERSION_AUTO=n" >> "${OUT}/.config"
+
+      # ── 12. Build the kernel ─────────────────────────────────────────────
+      - name: "Build kernel (Image.gz + dtbs + modules)"
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          set -e
+
+          JOBS=$(nproc --all)
+          echo "Building with ${JOBS} parallel jobs..."
+
+          BUILD_START=$(date +%s)
+
+          make \
+            O="${OUT}" \
+            ARCH="${ARCH}" \
+            SUBARCH="${SUBARCH}" \
+            CC="clang" \
+            CLANG_TRIPLE="aarch64-linux-gnu-" \
+            CROSS_COMPILE="aarch64-linux-android-" \
+            CROSS_COMPILE_ARM32="arm-linux-androideabi-" \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            -j"${JOBS}" \
+            Image.gz dtbs modules 2>&1 | tee "${GITHUB_WORKSPACE}/build.log"
+
+          BUILD_END=$(date +%s)
+          BUILD_DIFF=$((BUILD_END - BUILD_START))
+          echo ""
+          echo "Build completed in $((BUILD_DIFF / 60)) minutes and $((BUILD_DIFF % 60)) seconds."
+
+      # ── 13. Create Image.gz-dtb ──────────────────────────────────────────
+      - name: "Create Image.gz-dtb"
+        run: |
+          set -e
+          KERNEL_IMAGE="${OUT}/arch/arm64/boot/Image.gz"
+          DTB_DIR="${OUT}/arch/arm64/boot/dts"
+
+          if [ -f "${KERNEL_IMAGE}" ]; then
+            echo "Kernel image found: ${KERNEL_IMAGE}"
+            # Concatenate all SM7225 dtbs onto the kernel image
+            DTB_PATTERN="qcom/sm7225*"
+            cat "${KERNEL_IMAGE}" \
+                $(find "${DTB_DIR}" -name "sm7225*.dtb" -o \
+                                    -name "*a52xq*.dtb" 2>/dev/null | sort) \
+                > "${GITHUB_WORKSPACE}/Image.gz-dtb" 2>/dev/null || \
+            cp "${KERNEL_IMAGE}" "${GITHUB_WORKSPACE}/Image.gz-dtb"
+            echo "Image.gz-dtb created."
+          else
+            echo "ERROR: Kernel image not found at ${KERNEL_IMAGE}"
+            echo "Contents of out/arch/arm64/boot/:"
+            ls "${OUT}/arch/arm64/boot/" || true
+            exit 1
+          fi
+
+      # ── 14. Copy build outputs to staging area ───────────────────────────
+      - name: "Stage build artifacts"
+        run: |
+          STAGE="${GITHUB_WORKSPACE}/kernel-artifacts"
+          mkdir -p "${STAGE}"
+
+          # Kernel images
+          cp "${OUT}/arch/arm64/boot/Image.gz"      "${STAGE}/" 2>/dev/null || true
+          cp "${GITHUB_WORKSPACE}/Image.gz-dtb"     "${STAGE}/" 2>/dev/null || true
+
+          # DTBO image
+          if find "${OUT}/arch/arm64/boot/dts" -name "dtbo.img" 2>/dev/null | grep -q .; then
+            cp $(find "${OUT}/arch/arm64/boot/dts" -name "dtbo.img" | head -1) "${STAGE}/"
+          fi
+
+          # Modules
+          MODULES_DIR="${STAGE}/modules"
+          mkdir -p "${MODULES_DIR}"
+          find "${OUT}" -name "*.ko" -exec cp {} "${MODULES_DIR}/" \; 2>/dev/null || true
+          MODCOUNT=$(ls "${MODULES_DIR}"/*.ko 2>/dev/null | wc -l)
+          echo "Collected ${MODCOUNT} kernel modules."
+
+          # Build log
+          cp "${GITHUB_WORKSPACE}/build.log" "${STAGE}/" 2>/dev/null || true
+
+          echo ""
+          echo "Staged artifacts:"
+          ls -lh "${STAGE}/"
+
+      # ── 15. Build AnyKernel3 flashable zip ───────────────────────────────
+      - name: "Build AnyKernel3 flashable zip"
+        run: |
+          set -e
+          cd "${GITHUB_WORKSPACE}"
+
+          git clone --depth=1 \
+            https://github.com/osm0sis/AnyKernel3.git \
+            AnyKernel3 2>/dev/null || {
+              echo "AnyKernel3 clone failed — skipping zip creation."
+              exit 0
+            }
+
+          # Copy kernel image
+          cp kernel-artifacts/Image.gz-dtb AnyKernel3/ 2>/dev/null || \
+          cp kernel-artifacts/Image.gz     AnyKernel3/ 2>/dev/null || true
+
+          # Copy modules
+          if ls kernel-artifacts/modules/*.ko 2>/dev/null | grep -q .; then
+            mkdir -p AnyKernel3/modules/system/lib/modules
+            cp kernel-artifacts/modules/*.ko \
+               AnyKernel3/modules/system/lib/modules/ 2>/dev/null || true
+          fi
+
+          # Patch AnyKernel3 anykernel.sh for a526b
+          cat > AnyKernel3/anykernel.sh << 'AKSEOF'
+          # AnyKernel3 — Samsung Galaxy A52 5G (SM-A526B)
+          # by osm0sis @ xda-developers
+          properties() { '
+          kernel.string=LineageOS 23.2 Kernel for a526b by CI
+          do.devicecheck=1
+          do.modules=0
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=a526b
+          device.name2=SM-A526B
+          device.name3=a52xq
+          '; }
+
+          block=/dev/block/platform/soc/1d84000.ufshc/by-name/boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+
+          . tools/ak3-core.sh
+
+          split_boot;
+          flash_boot;
+          AKSEOF
+
+          # Strip leading spaces from heredoc
+          sed -i 's/^          //' AnyKernel3/anykernel.sh
+
+          # Create the zip
+          DATE=$(date +%Y%m%d-%H%M)
+          ZIP_NAME="LineageOS23.2-Kernel-a526b-${DATE}.zip"
+          cd AnyKernel3
+          zip -r9 "${GITHUB_WORKSPACE}/kernel-artifacts/${ZIP_NAME}" . \
+              -x "*.git*" -x "README.md" -x "*.DS_Store*"
+          echo "Created flashable zip: ${ZIP_NAME}"
+
+      # ── 16. Upload artifacts ─────────────────────────────────────────────
+      - name: "Upload kernel artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: "LineageOS23.2-Kernel-a526b-${{ github.sha }}"
+          path: |
+            kernel-artifacts/Image.gz
+            kernel-artifacts/Image.gz-dtb
+            kernel-artifacts/dtbo.img
+            kernel-artifacts/modules/
+            kernel-artifacts/*.zip
+            kernel-artifacts/build.log
+          retention-days: 30
+
+      # ── 17. Optional: debug session on failure ───────────────────────────
+      - name: "Setup tmate debug session (on failure)"
+        if: ${{ failure() && github.event.inputs.debug_enabled == 'true' }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+        timeout-minutes: 30
+
+      # ── 18. Print build summary ──────────────────────────────────────────
+      - name: "Build summary"
+        if: always()
+        run: |
+          echo "=============================================="
+          echo " LineageOS 23.2 Kernel Build — SM-A526B"
+          echo "=============================================="
+          echo " Device  : Samsung Galaxy A52 5G (SM-A526B)"
+          echo " Chipset : Qualcomm SM7225 (Snapdragon 750G)"
+          echo " Kernel  : 4.19 (a52xq-dev/kernel)"
+          echo " Target  : LineageOS 23.2 / Android 16 QPR2"
+          echo " BPF fix : techyminati/fuck-bpf (sixteen-qpr2)"
+          echo " Commit  : ${{ github.sha }}"
+          echo "=============================================="
+          if [ -f "${GITHUB_WORKSPACE}/kernel-artifacts/Image.gz" ]; then
+            echo " STATUS  : ✅ SUCCESS"
+            echo " Artifacts: $(ls kernel-artifacts/ | tr '\n' ' ')"
+          else
+            echo " STATUS  : ❌ FAILED — check build.log artifact"
+          fi
+          echo "=============================================="
