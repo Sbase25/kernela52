@@ -49,7 +49,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ca-certificates cpio \
             curl flex git kmod libelf-dev libssl-dev \
-            lz4 python3 rsync unzip wget zip \
+            lz4 python3 python2 rsync unzip wget zip \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             libncurses-dev libncurses5 libncurses5-dev
 
@@ -218,7 +218,31 @@ jobs:
           echo "BPF config result:"
           grep -iE "BPF|btf" "${OUT}/.config" | head -20
 
-      # ── 10. Set LOCALVERSION ──────────────────────────────────────────────
+      # ── 10. Fix Python 2 scripts (gcc-wrapper.py uses Python 2 print syntax) ──
+      - name: "Fix Python 2 scripts for Python 3"
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          # gcc-wrapper.py uses Python 2 print syntax which breaks on Ubuntu 22.04
+          # Fix it in-place with sed before the build starts
+          if [ -f scripts/gcc-wrapper.py ]; then
+            sed -i 's|print "error, forbidden warning:", m.group(2)|print("error, forbidden warning:", m.group(2))|g' scripts/gcc-wrapper.py
+            sed -i 's|print "suppressing warning|print("suppressing warning|g' scripts/gcc-wrapper.py
+            sed -i 's|m.group(0)$|m.group(0))|g' scripts/gcc-wrapper.py
+            echo "gcc-wrapper.py patched for Python 3:"
+            grep "print" scripts/gcc-wrapper.py
+          fi
+
+          # Fix any other Python 2 print statements in scripts/
+          find scripts/ -name "*.py" | xargs grep -l 'print "' 2>/dev/null | while read f; do
+            echo "Fixing Python 2 prints in: $f"
+            sed -i -E 's/print "([^"]*)"/print("\1")/g' "$f" 2>/dev/null || true
+          done
+
+          # Use python3 explicitly for all kernel scripts
+          sudo ln -sf /usr/bin/python3 /usr/local/bin/python 2>/dev/null || true
+          python --version
+
+      # ── 11. Set LOCALVERSION ──────────────────────────────────────────────
       - name: "Set LOCALVERSION"
         run: |
           sed -i "s|CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=\"${LOCALVERSION}\"|" \
