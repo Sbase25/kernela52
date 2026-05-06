@@ -42,6 +42,21 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: "Patch gcc-wrapper.py for Python 3"
+        working-directory: ${{ github.workspace }}
+        run: |
+          # Must run BEFORE any make command - Kconfig calls this script
+          # and crashes with SyntaxError if it has Python 2 print syntax
+          FILE="scripts/gcc-wrapper.py"
+          if [ -f "$FILE" ]; then
+            sed -i 's/print "error, forbidden warning:", m\.group(2)/print("error, forbidden warning:", m.group(2))/g' "$FILE"
+            sed -i 's/print "suppressing warning:\(.*\)"/print("suppressing warning:\1")/g' "$FILE"
+            # Symlink python -> python3
+            sudo ln -sf /usr/bin/python3 /usr/local/bin/python
+            echo "Patched. Contents:"
+            cat "$FILE"
+          fi
+
       # ── 1. Install build dependencies ──────────────────────────────────
       - name: "Install build dependencies"
         run: |
@@ -217,30 +232,6 @@ jobs:
 
           echo "BPF config result:"
           grep -iE "BPF|btf" "${OUT}/.config" | head -20
-
-      # ── 10. Fix Python 2 scripts (gcc-wrapper.py uses Python 2 print syntax) ──
-      - name: "Fix Python 2 scripts for Python 3"
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          # gcc-wrapper.py uses Python 2 print syntax which breaks on Ubuntu 22.04
-          # Fix it in-place with sed before the build starts
-          if [ -f scripts/gcc-wrapper.py ]; then
-            sed -i 's|print "error, forbidden warning:", m.group(2)|print("error, forbidden warning:", m.group(2))|g' scripts/gcc-wrapper.py
-            sed -i 's|print "suppressing warning|print("suppressing warning|g' scripts/gcc-wrapper.py
-            sed -i 's|m.group(0)$|m.group(0))|g' scripts/gcc-wrapper.py
-            echo "gcc-wrapper.py patched for Python 3:"
-            grep "print" scripts/gcc-wrapper.py
-          fi
-
-          # Fix any other Python 2 print statements in scripts/
-          find scripts/ -name "*.py" | xargs grep -l 'print "' 2>/dev/null | while read f; do
-            echo "Fixing Python 2 prints in: $f"
-            sed -i -E 's/print "([^"]*)"/print("\1")/g' "$f" 2>/dev/null || true
-          done
-
-          # Use python3 explicitly for all kernel scripts
-          sudo ln -sf /usr/bin/python3 /usr/local/bin/python 2>/dev/null || true
-          python --version
 
       # ── 11. Set LOCALVERSION ──────────────────────────────────────────────
       - name: "Set LOCALVERSION"
