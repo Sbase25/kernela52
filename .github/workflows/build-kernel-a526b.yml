@@ -280,31 +280,28 @@ jobs:
             cp kernel-artifacts/modules/*.ko AnyKernel3/modules/system/lib/modules/
           fi
 
-          python3 - << PYEOF
-content = """# AnyKernel3 - SM-A526B - LineageOS 23.2
-properties() { '
-kernel.string=LineageOS 23.2 Kernel for SM-A526B
-do.devicecheck=1
-do.modules=0
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=a526b
-device.name2=SM-A526B
-device.name3=a52xq
-'; }
-
-block=/dev/block/platform/soc/1d84000.ufshc/by-name/boot;
-is_slot_device=0;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
-
-. tools/ak3-core.sh
-split_boot;
-flash_boot;
-"""
-with open("AnyKernel3/anykernel.sh", "w") as f:
-    f.write(content)
-PYEOF
+          {
+            printf '%s\n' '# AnyKernel3 - SM-A526B - LineageOS 23.2'
+            printf '%s\n' 'properties() { '"'"''
+            printf '%s\n' 'kernel.string=LineageOS 23.2 Kernel for SM-A526B'
+            printf '%s\n' 'do.devicecheck=1'
+            printf '%s\n' 'do.modules=0'
+            printf '%s\n' 'do.cleanup=1'
+            printf '%s\n' 'do.cleanuponabort=0'
+            printf '%s\n' 'device.name1=a526b'
+            printf '%s\n' 'device.name2=SM-A526B'
+            printf '%s\n' 'device.name3=a52xq'
+            printf '%s\n' "'; }"
+            printf '%s\n' ''
+            printf '%s\n' 'block=/dev/block/platform/soc/1d84000.ufshc/by-name/boot;'
+            printf '%s\n' 'is_slot_device=0;'
+            printf '%s\n' 'ramdisk_compression=auto;'
+            printf '%s\n' 'patch_vbmeta_flag=auto;'
+            printf '%s\n' ''
+            printf '%s\n' '. tools/ak3-core.sh'
+            printf '%s\n' 'split_boot;'
+            printf '%s\n' 'flash_boot;'
+          } > AnyKernel3/anykernel.sh
 
           DATE=$(date +%Y%m%d-%H%M)
           ZIP="LineageOS23.2-Kernel-a526b-${DATE}.zip"
